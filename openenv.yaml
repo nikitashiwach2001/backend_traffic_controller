@@ -1,0 +1,118 @@
+name: adaptive-traffic-controller
+version: "1.0.0"
+description: >
+  LLM agent controls backend traffic throttling to prevent server crashes.
+  The agent observes real-time server metrics and chooses a throttling action
+  each step to keep CPU, memory, and latency within safe bounds.
+
+observation_space:
+  cpu_usage:
+    type: float
+    range: [0.0, 1.0]
+    description: CPU utilization as a fraction of total capacity
+  memory_usage:
+    type: float
+    range: [0.0, 1.0]
+    description: Memory utilization as a fraction of total capacity
+  request_rate:
+    type: float
+    unit: requests/sec
+    description: Current incoming request rate
+  queue_length:
+    type: int
+    range: [0, 500]
+    description: Number of pending requests waiting to be processed
+  avg_latency:
+    type: float
+    unit: milliseconds
+    description: Average response latency for processed requests
+  step:
+    type: int
+    description: Current step index within the episode
+  crashed:
+    type: bool
+    description: Whether the server has crashed this step
+
+action_space:
+  type: discrete
+  actions:
+    - id: allow_all
+      accept_rate: 1.0
+      description: Accept 100% of incoming requests
+    - id: throttle_70
+      accept_rate: 0.7
+      description: Accept 70%, drop 30% of incoming requests
+    - id: throttle_40
+      accept_rate: 0.4
+      description: Accept 40%, drop 60% of incoming requests
+    - id: drop_aggressive
+      accept_rate: 0.2
+      description: Accept 20%, drop 80% of incoming requests
+
+tasks:
+  - id: task_easy
+    difficulty: easy
+    episode_length: 30
+    description: >
+      Single spike: baseline 40 req/s, spike to 160 req/s at step 10 for
+      5 steps, return to 40. Agent must detect spike, throttle, and recover.
+    grading:
+      full_score: "no crash AND avg_latency < 300ms"
+      partial_score: "no crash but avg_latency >= 300ms → 0.5"
+      zero_score: "any crash → 0.0"
+
+  - id: task_medium
+    difficulty: medium
+    episode_length: 40
+    description: >
+      Three traffic spikes of 150 req/s at steps 5, 15, 25 (3 steps each),
+      baseline 50 req/s. Agent must handle repeated bursts.
+    grading:
+      formula: "score = (steps_without_crash / total_steps) * latency_factor"
+      latency_factor: "1.0 at <=200ms, 0.5 at >=600ms, linear between"
+
+  - id: task_hard
+    difficulty: hard
+    episode_length: 50
+    description: >
+      Sustained overload: traffic ramps 60→200 req/s over 20 steps, stays
+      at 200 for 20 steps, then drops to 80. Agent must balance throughput
+      vs. stability under prolonged high load.
+    grading:
+      formula: "score = throughput_ratio * 0.7 + queue_factor * 0.3"
+      throughput_ratio: "total_allowed / total_incoming"
+      stability_bonus: "crash zeroes out primary score (partial credit * 0.3)"
+      queue_factor: "fraction of steps with queue_length < 100"
+
+endpoints:
+  reset:
+    method: POST
+    path: /reset
+    description: Reset environment, returns initial state
+  step:
+    method: POST
+    path: /step
+    description: Execute action, returns next state, reward, done flag, and info
+  state:
+    method: GET
+    path: /state
+    description: Get current server state
+  tasks:
+    method: GET
+    path: /tasks
+    description: List all available tasks
+  spec:
+    method: GET
+    path: /openenv.yaml
+    description: This OpenEnv specification file
+  health:
+    method: GET
+    path: /health
+    description: Liveness probe
+
+infrastructure:
+  port: 7860
+  cpu: 2
+  memory_gb: 8
+  gpu_required: false
+  max_inference_minutes: 20
