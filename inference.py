@@ -123,7 +123,7 @@ def run_task(task_id: str, env_url: str) -> float:
     state = data["state"]
     max_steps = data["max_steps"]
 
-    print(f"  Starting {task_id} (max_steps={max_steps})")
+    print(f"[START] task={task_id} max_steps={max_steps} model={MODEL_NAME}")
 
     total_reward = 0.0
     final_score = 0.0
@@ -145,17 +145,17 @@ def run_task(task_id: str, env_url: str) -> float:
 
         crashed = info.get("crashed", False)
         print(
-            f"    step={step:3d} action={action:<18s} "
+            f"[STEP] task={task_id} step={step:3d} action={action:<18s} "
             f"reward={reward:+.3f} latency={state['avg_latency']:6.1f}ms "
             f"queue={state['queue_length']:4d} cpu={state['cpu_usage']:.2f}"
-            + (" [CRASH]" if crashed else "")
+            + (" crashed=true" if crashed else " crashed=false")
         )
 
         if done:
             final_score = info.get("final_score", 0.0)
             break
 
-    print(f"  {task_id} done — total_reward={total_reward:.3f}, score={final_score:.3f}")
+    print(f"[END] task={task_id} total_reward={total_reward:.3f} score={final_score:.3f}")
     http.close()
     return final_score
 
