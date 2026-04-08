@@ -90,6 +90,27 @@ The environment simulates a backend server receiving variable traffic. The agent
 
 ---
 
+## Configurable Environment
+
+The environment is fully configurable via the `/reset` endpoint. Pass a `config` object to simulate different server profiles:
+
+```bash
+curl -X POST localhost:7860/reset -H "Content-Type: application/json" \
+     -d '{"task_id": "task_easy", "config": {"server_capacity": 200, "base_latency": 30}}'
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `server_capacity` | 100.0 | Max requests/sec the server can handle |
+| `base_latency` | 50.0 | Response time at zero load (ms) |
+| `crash_load_ratio` | 1.3 | Server crashes at this multiple of capacity |
+| `max_queue` | 500 | Maximum pending request queue size |
+| `traffic_scale` | 1.0 | Multiplier for traffic patterns (2.0 = double traffic) |
+
+The LLM agent adapts automatically — the system prompt includes the configured capacity so the model knows the server's limits.
+
+---
+
 ## Setup
 
 ### Local (Python)
@@ -97,10 +118,10 @@ The environment simulates a backend server receiving variable traffic. The agent
 ```bash
 pip install -r requirements.txt
 
-# Start the environment server
-uvicorn environment:app --host 0.0.0.0 --port 7860
+# Start the environment + Gradio UI
+python app.py
 
-# In another terminal, run a quick smoke test
+# Smoke tests
 curl -s localhost:7860/health
 curl -s -X POST localhost:7860/reset -H "Content-Type: application/json" \
      -d '{"task_id": "task_easy"}' | python -m json.tool
@@ -115,8 +136,6 @@ curl -s localhost:7860/openenv.yaml
 ```bash
 docker build -t traffic-controller .
 docker run -p 7860:7860 traffic-controller
-
-# Same smoke tests work on localhost:7860
 ```
 
 ---
@@ -189,13 +208,17 @@ Measured on the deterministic simulator. Scores are in **0.0 – 1.0**.
 
 ```
 .
+├── app.py           # Gradio UI + mounts FastAPI endpoints
 ├── environment.py   # FastAPI app + episode logic
-├── tasks.py         # Traffic patterns + task metadata
-├── graders.py       # Per-task scoring functions
 ├── simulator.py     # Backend physics (latency, CPU, memory, crash)
-├── models.py        # Pydantic models (state, action, request/response)
-├── inference.py     # LLM agent runner
+├── models.py        # Pydantic models (state, action, config, request/response)
+├── tasks.py         # Traffic patterns + task metadata
+├── graders.py       # Per-task scoring functions (0.0–1.0)
+├── inference.py     # LLM agent runner (OpenAI client)
+├── client.py        # Python EnvClient for programmatic access
+├── __init__.py      # Exports Action, ServerState, EnvClient
 ├── openenv.yaml     # OpenEnv spec
+├── pyproject.toml   # Package metadata
 ├── Dockerfile
 ├── requirements.txt
 └── README.md

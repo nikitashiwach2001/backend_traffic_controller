@@ -128,7 +128,7 @@ def run_task(task_id: str, env_url: str) -> float:
     capacity = data.get("config", {}).get("server_capacity", 100.0)
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(capacity=capacity)
 
-    print(f"[START] task={task_id} max_steps={max_steps} model={MODEL_NAME} capacity={capacity}")
+    print(f"[START] task={task_id} max_steps={max_steps} model={MODEL_NAME}")
 
     total_reward = 0.0
     final_score = 0.0

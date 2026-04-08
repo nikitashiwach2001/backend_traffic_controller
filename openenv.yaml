@@ -84,11 +84,37 @@ tasks:
       stability_bonus: "crash zeroes out primary score (partial credit * 0.3)"
       queue_factor: "fraction of steps with queue_length < 100"
 
+configuration:
+  description: >
+    The environment is fully configurable via the /reset endpoint.
+    Pass a config object to simulate different server profiles.
+  parameters:
+    server_capacity:
+      type: float
+      default: 100.0
+      description: Maximum requests/sec the server can handle
+    base_latency:
+      type: float
+      default: 50.0
+      description: Baseline latency in ms at zero load
+    crash_load_ratio:
+      type: float
+      default: 1.3
+      description: Load ratio that causes a crash (1.3 = 130% of capacity)
+    max_queue:
+      type: int
+      default: 500
+      description: Maximum queue size
+    traffic_scale:
+      type: float
+      default: 1.0
+      description: Multiplier for traffic patterns (2.0 = double traffic)
+
 endpoints:
   reset:
     method: POST
     path: /reset
-    description: Reset environment, returns initial state
+    description: Reset environment, returns initial state. Accepts optional config object.
   step:
     method: POST
     path: /step
