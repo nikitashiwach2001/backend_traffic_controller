@@ -31,14 +31,25 @@ class ServerState(BaseModel):
     crashed: bool = Field(default=False, description="Whether server has crashed")
 
 
+class EnvConfig(BaseModel):
+    """User-configurable environment parameters."""
+    server_capacity: float = Field(default=100.0, gt=0, description="Max requests/sec the server can handle")
+    base_latency: float = Field(default=50.0, ge=0, description="Baseline latency in ms at zero load")
+    crash_load_ratio: float = Field(default=1.3, gt=1.0, description="Load ratio that causes a crash (e.g. 1.3 = 130% of capacity)")
+    max_queue: int = Field(default=500, gt=0, description="Maximum queue size before requests are dropped")
+    traffic_scale: float = Field(default=1.0, gt=0, description="Multiplier for traffic patterns (2.0 = double the traffic)")
+
+
 class ResetRequest(BaseModel):
     task_id: str = Field(default="task_easy", description="Task to run")
+    config: EnvConfig = Field(default_factory=EnvConfig, description="Environment configuration")
 
 
 class ResetResponse(BaseModel):
     state: ServerState
     task_id: str
     max_steps: int
+    config: EnvConfig = Field(default_factory=EnvConfig, description="Active environment configuration")
 
 
 class StepRequest(BaseModel):

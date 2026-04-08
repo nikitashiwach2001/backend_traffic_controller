@@ -39,13 +39,14 @@ client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 # Prompts
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a backend traffic controller agent.
+SYSTEM_PROMPT_TEMPLATE = """You are a backend traffic controller agent.
 Your goal: prevent server crashes while maximizing throughput.
+Server capacity: {capacity} req/s.
 
 Server state fields:
   cpu_usage      — fraction 0.0–1.0 (danger above 0.8)
   memory_usage   — fraction 0.0–1.0 (danger above 0.8)
-  request_rate   — incoming requests per second
+  request_rate   — incoming requests per second (compare against capacity)
   queue_length   — pending requests (danger above 200)
   avg_latency    — milliseconds (danger above 400ms)
 
@@ -55,11 +56,11 @@ Available actions (choose exactly one):
   throttle_40      — accept 40%, drop 60% (use when load is high)
   drop_aggressive  — accept 20%, drop 80% (use when crash is imminent)
 
-Decision heuristics:
-  - cpu < 0.6 AND latency < 200ms AND queue < 50  → allow_all
-  - cpu < 0.75 OR latency < 300ms                  → throttle_70
-  - cpu < 0.9 OR latency < 500ms OR queue < 150    → throttle_40
-  - otherwise                                       → drop_aggressive
+Decision heuristics (relative to server capacity):
+  - request_rate < 70% capacity AND cpu < 0.6 AND latency < 200ms → allow_all
+  - request_rate < 100% capacity                                    → throttle_70
+  - request_rate < 130% capacity                                    → throttle_40
+  - otherwise                                                        → drop_aggressive
 
 Respond with ONLY the action name, nothing else. No punctuation, no explanation."""
 
@@ -79,7 +80,7 @@ def _format_state(state: dict) -> str:
 # LLM interaction
 # ---------------------------------------------------------------------------
 
-def get_action(state: dict) -> str:
+def get_action(state: dict, system_prompt: str) -> str:
     """Query the LLM for a throttling action given the current server state."""
     user_msg = f"Current server state: {_format_state(state)}\nChoose action:"
 
@@ -88,7 +89,7 @@ def get_action(state: dict) -> str:
             response = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
                 max_tokens=20,
@@ -123,14 +124,18 @@ def run_task(task_id: str, env_url: str) -> float:
     state = data["state"]
     max_steps = data["max_steps"]
 
-    print(f"[START] task={task_id} max_steps={max_steps} model={MODEL_NAME}")
+    # Build capacity-aware system prompt from environment info
+    capacity = data.get("config", {}).get("server_capacity", 100.0)
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(capacity=capacity)
+
+    print(f"[START] task={task_id} max_steps={max_steps} model={MODEL_NAME} capacity={capacity}")
 
     total_reward = 0.0
     final_score = 0.0
     step = 0
 
     while True:
-        action = get_action(state)
+        action = get_action(state, system_prompt)
         step_resp = http.post("/step", json={"action": action})
         step_resp.raise_for_status()
         result = step_resp.json()

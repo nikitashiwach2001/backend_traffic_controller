@@ -26,6 +26,7 @@ from graders import grade
 from models import (
     Action,
     ACTION_ACCEPT_RATE,
+    EnvConfig,
     EpisodeStep,
     HealthResponse,
     ResetRequest,
@@ -45,16 +46,19 @@ from tasks import EPISODE_LENGTHS, TASK_METADATA, TRAFFIC_PATTERNS
 class EnvSession:
     def __init__(self) -> None:
         self.task_id: str = "task_easy"
-        self.state: ServerState = initial_state()
+        self.config: EnvConfig = EnvConfig()
+        self.state: ServerState = initial_state(config=self.config)
         self.step: int = 0
         self.done: bool = False
         self.history: list[EpisodeStep] = []
 
-    def reset(self, task_id: str) -> ServerState:
+    def reset(self, task_id: str, config: EnvConfig | None = None) -> ServerState:
+        if config is not None:
+            self.config = config
         traffic_fn = TRAFFIC_PATTERNS[task_id]
-        first_incoming = traffic_fn(0)
+        first_incoming = traffic_fn(0) * self.config.traffic_scale
         self.task_id = task_id
-        self.state = initial_state(first_incoming)
+        self.state = initial_state(first_incoming, config=self.config)
         self.step = 0
         self.done = False
         self.history = []
@@ -65,14 +69,15 @@ class EnvSession:
             raise ValueError("Episode is done. Call /reset to start a new episode.")
 
         task_id = self.task_id
+        config = self.config
         traffic_fn = TRAFFIC_PATTERNS[task_id]
         max_steps = EPISODE_LENGTHS[task_id]
 
-        incoming = traffic_fn(self.step)
+        incoming = traffic_fn(self.step) * config.traffic_scale
         accept_rate = ACTION_ACCEPT_RATE[action]
         allowed = incoming * accept_rate
 
-        next_state, crashed = compute_next_state(self.state, allowed, incoming)
+        next_state, crashed = compute_next_state(self.state, allowed, incoming, config=config)
         next_state.step = self.step + 1
 
         # --- Reward shaping ---
@@ -100,10 +105,8 @@ class EnvSession:
         self.done = crashed or (self.step >= max_steps)
 
         # Expose the *upcoming* incoming rate so the agent can react proactively.
-        # This mirrors real monitoring: you see current traffic flow before deciding
-        # the next throttle level.
         if not self.done:
-            upcoming = traffic_fn(self.step)
+            upcoming = traffic_fn(self.step) * config.traffic_scale
             self.state.request_rate = round(upcoming, 2)
 
         info: dict[str, Any] = {
@@ -113,6 +116,7 @@ class EnvSession:
             "crashed": crashed,
             "episode_step": self.step,
             "max_steps": max_steps,
+            "server_capacity": config.server_capacity,
         }
 
         if self.done:
@@ -184,11 +188,12 @@ async def reset(body: ResetRequest = ResetRequest()) -> ResetResponse:
             detail=f"Unknown task_id {body.task_id!r}. "
                    f"Valid: {list(TRAFFIC_PATTERNS.keys())}",
         )
-    state = SESSION.reset(body.task_id)
+    state = SESSION.reset(body.task_id, config=body.config)
     return ResetResponse(
         state=state,
         task_id=body.task_id,
         max_steps=EPISODE_LENGTHS[body.task_id],
+        config=SESSION.config,
     )
 
 

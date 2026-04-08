@@ -2,45 +2,47 @@
 
 from __future__ import annotations
 
-from models import ServerState
+from models import EnvConfig, ServerState
 
-MAX_CAPACITY = 100.0   # requests/sec the backend can handle at full health
-BASE_LATENCY = 50.0    # milliseconds at zero load
-MAX_QUEUE = 500
-CRASH_LOAD_RATIO = 1.3  # server crashes when 30% or more over capacity
+# Default config (used when no config is provided)
+DEFAULT_CONFIG = EnvConfig()
 
 
 def compute_next_state(
     current_state: ServerState,
     allowed_requests: float,
     incoming_requests: float,
+    config: EnvConfig = DEFAULT_CONFIG,
 ) -> tuple[ServerState, bool]:
     """
     Compute the next server state after one time step.
 
     Returns (next_state, crashed).
 
-    The environment exposes the *upcoming* request_rate in the observation so
-    the agent can react before overload happens (see environment.py).
-    Crash fires when allowed traffic exceeds 130% of capacity in a single step.
+    All thresholds are driven by `config` so users can simulate
+    servers with different capacities, latencies, and crash points.
     """
-    load_ratio = allowed_requests / MAX_CAPACITY
+    capacity = config.server_capacity
+    base_lat = config.base_latency
+    max_queue = config.max_queue
+
+    load_ratio = allowed_requests / capacity
 
     # Latency spikes superlinearly under load
     if load_ratio <= 1.0:
-        latency = BASE_LATENCY * (1.0 + load_ratio ** 2)
+        latency = base_lat * (1.0 + load_ratio ** 2)
     else:
-        latency = BASE_LATENCY * (1.0 + load_ratio ** 3)  # exponential degradation
+        latency = base_lat * (1.0 + load_ratio ** 3)  # exponential degradation
 
     # Queue builds when allowed requests exceed capacity
-    queue_delta = max(0.0, allowed_requests - MAX_CAPACITY)
+    queue_delta = max(0.0, allowed_requests - capacity)
     # Queue drains when load is under capacity (servers catch up)
-    queue_drain = max(0.0, (MAX_CAPACITY - allowed_requests) * 0.3)
+    queue_drain = max(0.0, (capacity - allowed_requests) * 0.3)
     new_queue = current_state.queue_length + queue_delta - queue_drain
-    queue_length = int(min(MAX_QUEUE, max(0.0, new_queue)))
+    queue_length = int(min(max_queue, max(0.0, new_queue)))
 
-    # Crash if load exceeds 130% of capacity
-    crashed = load_ratio > CRASH_LOAD_RATIO
+    # Crash if load exceeds crash threshold
+    crashed = load_ratio > config.crash_load_ratio
 
     # Latency grows with queue backlog
     latency += queue_length * 0.5
@@ -61,10 +63,13 @@ def compute_next_state(
     return next_state, crashed
 
 
-def initial_state(incoming_requests: float = 40.0) -> ServerState:
+def initial_state(incoming_requests: float = 40.0, config: EnvConfig = DEFAULT_CONFIG) -> ServerState:
     """Return a clean initial server state."""
-    load_ratio = incoming_requests / MAX_CAPACITY
-    latency = BASE_LATENCY * (1.0 + load_ratio ** 2)
+    capacity = config.server_capacity
+    base_lat = config.base_latency
+
+    load_ratio = incoming_requests / capacity
+    latency = base_lat * (1.0 + load_ratio ** 2)
     cpu = min(1.0, 0.3 + load_ratio * 0.6)
     memory = min(1.0, 0.2 + load_ratio * 0.4)
     return ServerState(
