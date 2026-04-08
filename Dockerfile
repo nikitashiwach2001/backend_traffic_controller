@@ -12,8 +12,13 @@ COPY . .
 # HuggingFace Spaces requires port 7860
 EXPOSE 7860
 
-# Healthcheck so orchestrators know when the app is ready
-HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"
+# HF Spaces runs as user with uid 1000
+RUN useradd -m -u 1000 user
+USER user
 
-CMD ["uvicorn", "environment:app", "--host", "0.0.0.0", "--port", "7860"]
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH \
+    GRADIO_SERVER_NAME=0.0.0.0 \
+    GRADIO_SERVER_PORT=7860
+
+CMD ["python", "app.py"]
