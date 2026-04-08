@@ -7,3 +7,4 @@ numpy>=1.26.0
 pyyaml>=6.0.1
 gradio>=4.30.0
 plotly>=5.22.0
+openenv-core
