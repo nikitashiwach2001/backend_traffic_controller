@@ -7,15 +7,14 @@ sdk: docker
 app_port: 7860
 tags:
   - openenv
-  - reinforcement-learning
-  - traffic-control
   - llm-agent
+  - traffic-control
 license: mit
 ---
 
 # Adaptive Backend Traffic Controller
 
-An **OpenEnv**-compatible reinforcement learning environment where an LLM agent learns to prevent backend server crashes by intelligently throttling incoming traffic in real-time.
+An **OpenEnv**-compatible environment where an LLM agent prevents backend server crashes by intelligently throttling incoming traffic in real-time. The agent observes server metrics, reasons about the situation, and picks the optimal throttling action — no training required, just prompting.
 
 Built for the **Scaler × Meta PyTorch Hackathon**.
 
