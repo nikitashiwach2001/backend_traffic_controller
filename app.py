@@ -490,4 +490,11 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    # Mount the FastAPI environment endpoints (required for hackathon evaluation)
+    # so /reset, /step, /state, /health, /tasks, /openenv.yaml all work
+    # alongside the Gradio UI on the same port.
+    from environment import app as fastapi_app
+
+    gradio_app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+    import uvicorn
+    uvicorn.run(gradio_app, host="0.0.0.0", port=7860)
