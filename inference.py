@@ -24,8 +24,8 @@ from openai import OpenAI
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.environ["API_BASE_URL"]
-MODEL_NAME: str = os.environ["MODEL_NAME"]
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME: str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 HF_TOKEN: str = os.environ["HF_TOKEN"]
 ENV_URL: str = os.environ.get("ENV_URL", "http://localhost:7860")
 
