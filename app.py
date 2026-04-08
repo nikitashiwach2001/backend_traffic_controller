@@ -1,17 +1,26 @@
 """
 Gradio demo for the Adaptive Traffic Controller.
 
-Runs the simulation with a rule-based agent and visualises every step
-through interactive charts. Deploy on HF Spaces as-is.
+Features:
+  - Step-by-step animated simulation with live reasoning log
+  - Rule-based agent OR real LLM agent (user provides API key)
+  - Baseline comparisons to show why smart control matters
+  - Interactive Plotly charts for all server metrics
 
-    pip install gradio plotly
+Deploy on HF Spaces with Docker.
+
+    pip install gradio plotly openai
     python app.py
 """
 
 from __future__ import annotations
 
+import time
+from typing import Generator
+
 import gradio as gr
 import plotly.graph_objects as go
+from openai import OpenAI
 from plotly.subplots import make_subplots
 
 from models import Action, ACTION_ACCEPT_RATE, ServerState
@@ -19,7 +28,7 @@ from simulator import compute_next_state, initial_state
 from tasks import TRAFFIC_PATTERNS, EPISODE_LENGTHS
 
 # ---------------------------------------------------------------------------
-# Rule-based agent (mirrors the LLM system prompt heuristics)
+# Constants
 # ---------------------------------------------------------------------------
 
 ACTION_LABELS = {
@@ -30,135 +39,139 @@ ACTION_LABELS = {
 }
 
 ACTION_COLORS = {
-    Action.allow_all: "#2ecc71",       # green
-    Action.throttle_70: "#f1c40f",     # yellow
-    Action.throttle_40: "#e67e22",     # orange
-    Action.drop_aggressive: "#e74c3c", # red
+    Action.allow_all: "#2ecc71",
+    Action.throttle_70: "#f1c40f",
+    Action.throttle_40: "#e67e22",
+    Action.drop_aggressive: "#e74c3c",
 }
 
+ACTION_EMOJI = {
+    Action.allow_all: "🟢",
+    Action.throttle_70: "🟡",
+    Action.throttle_40: "🟠",
+    Action.drop_aggressive: "🔴",
+}
 
-def rule_based_agent(state: ServerState) -> Action:
-    """Heuristic agent — uses both current metrics AND upcoming request_rate."""
+VALID_ACTIONS = {"allow_all", "throttle_70", "throttle_40", "drop_aggressive"}
+
+LLM_SYSTEM_PROMPT = """You are a backend traffic controller agent.
+Your goal: prevent server crashes while maximizing throughput.
+
+Server state fields:
+  cpu_usage      — fraction 0.0–1.0 (danger above 0.8)
+  memory_usage   — fraction 0.0–1.0 (danger above 0.8)
+  request_rate   — incoming requests per second
+  queue_length   — pending requests (danger above 200)
+  avg_latency    — milliseconds (danger above 400ms)
+
+Available actions (choose exactly one):
+  allow_all        — accept 100% of requests (use when load is safe)
+  throttle_70      — accept 70%, drop 30% (use when load is moderate)
+  throttle_40      — accept 40%, drop 60% (use when load is high)
+  drop_aggressive  — accept 20%, drop 80% (use when crash is imminent)
+
+Decision heuristics:
+  - cpu < 0.6 AND latency < 200ms AND queue < 50  → allow_all
+  - cpu < 0.75 OR latency < 300ms                  → throttle_70
+  - cpu < 0.9 OR latency < 500ms OR queue < 150    → throttle_40
+  - otherwise                                       → drop_aggressive
+
+Respond with ONLY the action name, nothing else. No punctuation, no explanation."""
+
+# ---------------------------------------------------------------------------
+# Agents
+# ---------------------------------------------------------------------------
+
+
+def rule_based_agent(state: ServerState) -> tuple[Action, str]:
+    """Returns (action, reasoning_text)."""
     cpu = state.cpu_usage
     latency = state.avg_latency
     queue = state.queue_length
-    rate = state.request_rate  # upcoming traffic the env exposes
+    rate = state.request_rate
 
-    # Proactive: if upcoming traffic would exceed capacity, throttle early
     if rate > 130:
-        return Action.drop_aggressive
+        reason = f"Incoming rate {rate:.0f} req/s >> capacity (100). Drop aggressively to prevent crash."
+        return Action.drop_aggressive, reason
     if rate > 100:
-        return Action.throttle_40
+        reason = f"Incoming rate {rate:.0f} req/s exceeds capacity. Throttle to 40% to stay safe."
+        return Action.throttle_40, reason
     if rate > 70:
-        return Action.throttle_70
+        reason = f"Incoming rate {rate:.0f} req/s is elevated. Throttle to 70% as precaution."
+        return Action.throttle_70, reason
 
-    # Reactive: use current server health
     if cpu < 0.6 and latency < 200 and queue < 50:
-        return Action.allow_all
+        reason = f"All clear — CPU {cpu:.0%}, latency {latency:.0f}ms, queue {queue}. Allow all traffic."
+        return Action.allow_all, reason
     if cpu < 0.75 and latency < 300:
-        return Action.throttle_70
+        reason = f"Moderate load — CPU {cpu:.0%}, latency {latency:.0f}ms. Throttle to 70%."
+        return Action.throttle_70, reason
     if cpu < 0.9 and latency < 500 and queue < 150:
-        return Action.throttle_40
-    return Action.drop_aggressive
+        reason = f"High load — CPU {cpu:.0%}, latency {latency:.0f}ms, queue {queue}. Throttle to 40%."
+        return Action.throttle_40, reason
+
+    reason = f"Critical — CPU {cpu:.0%}, latency {latency:.0f}ms, queue {queue}. Drop aggressive!"
+    return Action.drop_aggressive, reason
 
 
-# ---------------------------------------------------------------------------
-# Random / naive baselines for comparison
-# ---------------------------------------------------------------------------
-
-def always_allow_agent(_state: ServerState) -> Action:
-    return Action.allow_all
+def always_allow_agent(state: ServerState) -> tuple[Action, str]:
+    return Action.allow_all, "No intelligence — blindly accepting all traffic regardless of load."
 
 
-def always_throttle_agent(_state: ServerState) -> Action:
-    return Action.throttle_40
+def always_throttle_agent(state: ServerState) -> tuple[Action, str]:
+    return Action.throttle_40, "No intelligence — always throttling to 40% regardless of conditions."
 
 
-AGENTS = {
+def make_llm_agent(api_base: str, api_key: str, model_name: str):
+    """Create an LLM-based agent closure."""
+    client = OpenAI(base_url=api_base, api_key=api_key)
+
+    def llm_agent(state: ServerState) -> tuple[Action, str]:
+        user_msg = (
+            f"cpu_usage={state.cpu_usage:.3f} "
+            f"memory_usage={state.memory_usage:.3f} "
+            f"request_rate={state.request_rate:.1f} req/s "
+            f"queue_length={state.queue_length} "
+            f"avg_latency={state.avg_latency:.1f}ms"
+        )
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Current server state: {user_msg}\nChoose action:"},
+                ],
+                max_tokens=20,
+                temperature=0.0,
+            )
+            raw = response.choices[0].message.content.strip().lower()
+            action_str = raw.split()[0].rstrip(".,;:!") if raw.split() else ""
+            if action_str in VALID_ACTIONS:
+                action = Action(action_str)
+                reason = f"LLM chose `{action_str}` (raw: \"{raw}\")"
+                return action, reason
+            else:
+                reason = f"LLM returned invalid action \"{raw}\", falling back to throttle_70"
+                return Action.throttle_70, reason
+        except Exception as exc:
+            reason = f"LLM call failed: {exc}. Falling back to throttle_70"
+            return Action.throttle_70, reason
+
+    return llm_agent
+
+
+BUILTIN_AGENTS = {
     "Smart Agent (rule-based)": rule_based_agent,
     "Baseline: Always Allow": always_allow_agent,
     "Baseline: Always Throttle 40%": always_throttle_agent,
 }
 
-# ---------------------------------------------------------------------------
-# Simulation runner
-# ---------------------------------------------------------------------------
-
-def run_episode(task_id: str, agent_fn):
-    traffic_fn = TRAFFIC_PATTERNS[task_id]
-    max_steps = EPISODE_LENGTHS[task_id]
-
-    state = initial_state(traffic_fn(0))
-    steps, cpus, mems, latencies, queues = [], [], [], [], []
-    incoming_rates, allowed_rates, rewards, actions = [], [], [], []
-    cumulative_reward = []
-    total_reward = 0.0
-
-    for step in range(max_steps):
-        action = agent_fn(state)
-        incoming = traffic_fn(step)
-        accept_rate = ACTION_ACCEPT_RATE[action]
-        allowed = incoming * accept_rate
-
-        next_state, crashed = compute_next_state(state, allowed, incoming)
-        next_state.step = step + 1
-
-        # Reward (same formula as environment.py)
-        throughput_reward = allowed / max(incoming, 1.0)
-        latency_penalty = max(0.0, (next_state.avg_latency - 200.0) / 800.0)
-        queue_penalty = min(1.0, next_state.queue_length / 500.0)
-        reward = throughput_reward - latency_penalty * 0.5 - queue_penalty * 0.3
-        if crashed:
-            reward = -10.0
-        reward = round(reward, 4)
-        total_reward += reward
-
-        steps.append(step)
-        cpus.append(next_state.cpu_usage)
-        mems.append(next_state.memory_usage)
-        latencies.append(next_state.avg_latency)
-        queues.append(next_state.queue_length)
-        incoming_rates.append(incoming)
-        allowed_rates.append(allowed)
-        rewards.append(reward)
-        actions.append(action)
-        cumulative_reward.append(total_reward)
-
-        if crashed:
-            break
-
-        # Update state for next step
-        if step + 1 < max_steps:
-            upcoming = traffic_fn(step + 1)
-            next_state.request_rate = round(upcoming, 2)
-        state = next_state
-
-    return {
-        "steps": steps,
-        "cpu": cpus,
-        "memory": mems,
-        "latency": latencies,
-        "queue": queues,
-        "incoming": incoming_rates,
-        "allowed": allowed_rates,
-        "reward": rewards,
-        "cumulative_reward": cumulative_reward,
-        "actions": actions,
-        "crashed": crashed,
-        "total_reward": total_reward,
-        "final_step": len(steps),
-        "max_steps": max_steps,
-    }
-
 
 # ---------------------------------------------------------------------------
-# Plotly charts
+# Build charts from episode data
 # ---------------------------------------------------------------------------
 
-def build_dashboard(task_id: str, agent_name: str):
-    agent_fn = AGENTS[agent_name]
-    data = run_episode(task_id, agent_fn)
-
+def build_charts(data: dict) -> go.Figure:
     steps = data["steps"]
     fig = make_subplots(
         rows=3, cols=2,
@@ -174,7 +187,7 @@ def build_dashboard(task_id: str, agent_name: str):
         horizontal_spacing=0.08,
     )
 
-    # 1) Traffic: incoming vs allowed
+    # 1) Traffic
     fig.add_trace(go.Scatter(
         x=steps, y=data["incoming"], name="Incoming",
         line=dict(color="#e74c3c", width=2),
@@ -185,11 +198,10 @@ def build_dashboard(task_id: str, agent_name: str):
         line=dict(color="#2ecc71", width=2),
         fill="tozeroy", fillcolor="rgba(46,204,113,0.1)",
     ), row=1, col=1)
-    # Capacity line
     fig.add_hline(y=100, line_dash="dash", line_color="gray",
                   annotation_text="Server Capacity", row=1, col=1)
 
-    # 2) Actions as colored bar chart
+    # 2) Actions
     action_colors = [ACTION_COLORS[a] for a in data["actions"]]
     action_labels = [ACTION_LABELS[a] for a in data["actions"]]
     accept_pcts = [ACTION_ACCEPT_RATE[a] * 100 for a in data["actions"]]
@@ -237,28 +249,150 @@ def build_dashboard(task_id: str, agent_name: str):
         fill="tozeroy", fillcolor="rgba(44,62,80,0.08)",
     ), row=3, col=2)
 
-    # Layout
     fig.update_layout(
         height=900,
         showlegend=False,
         template="plotly_white",
-        title_text=f"Adaptive Traffic Controller — {task_id} | {agent_name}",
+        title_text="Adaptive Traffic Controller",
         title_x=0.5,
         font=dict(size=12),
         margin=dict(t=80, b=40),
     )
+    return fig
 
-    # Summary
-    status = "CRASHED" if data["crashed"] else "Survived"
+
+# ---------------------------------------------------------------------------
+# Step-by-step streaming simulation
+# ---------------------------------------------------------------------------
+
+def run_simulation_streaming(
+    task_id: str,
+    agent_name: str,
+    api_base: str,
+    api_key: str,
+    model_name: str,
+) -> Generator:
+    """
+    Generator that yields (plot, log_text, summary) after each step.
+    Gradio streams these updates to the UI in real time.
+    """
+
+    # Pick agent
+    if agent_name == "LLM Agent (bring your own key)":
+        if not api_key.strip() or not model_name.strip():
+            yield (
+                None,
+                "**Error:** Please provide API Base URL, API Key, and Model Name to use LLM Agent.",
+                "",
+            )
+            return
+        agent_fn = make_llm_agent(api_base.strip(), api_key.strip(), model_name.strip())
+    else:
+        agent_fn = BUILTIN_AGENTS[agent_name]
+
+    traffic_fn = TRAFFIC_PATTERNS[task_id]
+    max_steps = EPISODE_LENGTHS[task_id]
+
+    state = initial_state(traffic_fn(0))
+
+    # Accumulators
+    data = {
+        "steps": [], "cpu": [], "memory": [], "latency": [], "queue": [],
+        "incoming": [], "allowed": [], "reward": [], "cumulative_reward": [],
+        "actions": [],
+    }
+    total_reward = 0.0
+    log_lines: list[str] = []
+    crashed = False
+
+    log_lines.append(f"### Simulation: {task_id} | {agent_name}")
+    log_lines.append(f"Server capacity: **100 req/s** | Max steps: **{max_steps}**")
+    log_lines.append("---")
+
+    for step in range(max_steps):
+        action, reason = agent_fn(state)
+        incoming = traffic_fn(step)
+        accept_rate = ACTION_ACCEPT_RATE[action]
+        allowed = incoming * accept_rate
+
+        next_state, crashed = compute_next_state(state, allowed, incoming)
+        next_state.step = step + 1
+
+        # Reward
+        throughput_reward = allowed / max(incoming, 1.0)
+        latency_penalty = max(0.0, (next_state.avg_latency - 200.0) / 800.0)
+        queue_penalty = min(1.0, next_state.queue_length / 500.0)
+        reward = throughput_reward - latency_penalty * 0.5 - queue_penalty * 0.3
+        if crashed:
+            reward = -10.0
+        reward = round(reward, 4)
+        total_reward += reward
+
+        # Store
+        data["steps"].append(step)
+        data["cpu"].append(next_state.cpu_usage)
+        data["memory"].append(next_state.memory_usage)
+        data["latency"].append(next_state.avg_latency)
+        data["queue"].append(next_state.queue_length)
+        data["incoming"].append(incoming)
+        data["allowed"].append(allowed)
+        data["reward"].append(reward)
+        data["cumulative_reward"].append(total_reward)
+        data["actions"].append(action)
+
+        # Build reasoning log line
+        emoji = ACTION_EMOJI[action]
+        status_icon = "💀" if crashed else ("⚠️" if next_state.cpu_usage > 0.8 or next_state.avg_latency > 400 else "✅")
+
+        log_lines.append(
+            f"**Step {step}** {status_icon} | "
+            f"Traffic: {incoming:.0f} req/s | "
+            f"Action: {emoji} `{action.value}` → allowed {allowed:.0f} req/s\n"
+            f"> {reason}\n"
+            f"> CPU: {next_state.cpu_usage:.0%} | "
+            f"Latency: {next_state.avg_latency:.0f}ms | "
+            f"Queue: {next_state.queue_length} | "
+            f"Reward: {reward:+.3f}"
+        )
+
+        if crashed:
+            log_lines.append("\n## 💀 SERVER CRASHED!")
+            log_lines.append(f"Load ratio: {allowed/100:.2f}x capacity (crash threshold: 1.3x)")
+            break
+
+        # Update state
+        if step + 1 < max_steps:
+            upcoming = traffic_fn(step + 1)
+            next_state.request_rate = round(upcoming, 2)
+        state = next_state
+
+        # Summary so far
+        status = "CRASHED" if crashed else "Running..."
+        summary = (
+            f"### Results (step {step + 1}/{max_steps})\n"
+            f"- **Status:** {status}\n"
+            f"- **Total reward:** {total_reward:.3f}\n"
+        )
+
+        fig = build_charts(data)
+        log_text = "\n\n".join(log_lines)
+
+        yield fig, log_text, summary
+
+    # Final summary
+    status = "💀 CRASHED" if crashed else "✅ Survived"
+    final_step = len(data["steps"])
     summary = (
-        f"### Results\n"
+        f"### Final Results\n"
         f"- **Status:** {status}\n"
-        f"- **Steps completed:** {data['final_step']} / {data['max_steps']}\n"
-        f"- **Total reward:** {data['total_reward']:.3f}\n"
-        f"- **Avg reward/step:** {data['total_reward'] / max(data['final_step'], 1):.3f}\n"
+        f"- **Steps completed:** {final_step} / {max_steps}\n"
+        f"- **Total reward:** {total_reward:.3f}\n"
+        f"- **Avg reward/step:** {total_reward / max(final_step, 1):.3f}\n"
     )
 
-    return fig, summary
+    fig = build_charts(data)
+    log_text = "\n\n".join(log_lines)
+    yield fig, log_text, summary
 
 
 # ---------------------------------------------------------------------------
@@ -269,26 +403,28 @@ DESCRIPTION = """
 # Adaptive Traffic Controller
 
 An LLM agent that dynamically throttles backend traffic to **prevent server crashes
-while maximising throughput**. Watch how it reacts to traffic spikes in real time!
+while maximising throughput**. Watch the agent think step-by-step!
 
-**How it works:**
-1. Pick a traffic scenario (easy/medium/hard) and an agent strategy
-2. The simulation runs step-by-step — each step the agent observes server metrics
-   (CPU, memory, latency, queue) and decides how much traffic to allow
-3. Charts show every metric and the agent's decisions over time
+### How it works
+1. A simulated server receives traffic spikes (40 → 200 req/s) but can only handle **100 req/s**
+2. Each step, the agent **observes** server metrics (CPU, memory, latency, queue length)
+3. The agent **decides** how much traffic to allow: 100%, 70%, 40%, or 20%
+4. If too much traffic gets through → the server **crashes** (game over!)
 
-**Actions available to the agent:**
-| Action | Traffic Allowed |
-|---|---|
-| `allow_all` | 100% |
-| `throttle_70` | 70% |
-| `throttle_40` | 40% |
-| `drop_aggressive` | 20% |
+### Try it
+- Run the **Smart Agent** on different difficulties to see it handle spikes
+- Switch to **"Always Allow" baseline** to watch the server crash instantly
+- Bring your own LLM API key to test a real model as the controller!
 """
+
+AGENT_CHOICES = list(BUILTIN_AGENTS.keys()) + ["LLM Agent (bring your own key)"]
 
 with gr.Blocks(
     title="Adaptive Traffic Controller",
     theme=gr.themes.Soft(),
+    css="""
+    .reasoning-log { max-height: 400px; overflow-y: auto; }
+    """,
 ) as demo:
     gr.Markdown(DESCRIPTION)
 
@@ -297,28 +433,60 @@ with gr.Blocks(
             choices=["task_easy", "task_medium", "task_hard"],
             value="task_easy",
             label="Traffic Scenario",
+            info="Easy = 1 spike, Medium = 3 spikes, Hard = sustained ramp to 200 req/s",
         )
         agent_dd = gr.Dropdown(
-            choices=list(AGENTS.keys()),
+            choices=AGENT_CHOICES,
             value="Smart Agent (rule-based)",
             label="Agent Strategy",
         )
         run_btn = gr.Button("Run Simulation", variant="primary", scale=0)
 
-    plot_out = gr.Plot(label="Dashboard")
-    summary_out = gr.Markdown()
+    # LLM config section (shown only when LLM Agent is selected)
+    with gr.Accordion("LLM Configuration", open=True, visible=False) as llm_config:
+        gr.Markdown("*Provide your own OpenAI-compatible API endpoint to test a real LLM as the traffic controller.*")
+        with gr.Row():
+            api_base_input = gr.Textbox(
+                label="API Base URL",
+                placeholder="https://api-inference.huggingface.co/v1",
+                value="https://api-inference.huggingface.co/v1",
+            )
+            api_key_input = gr.Textbox(
+                label="API Key",
+                placeholder="hf_... or sk-...",
+                type="password",
+            )
+            model_name_input = gr.Textbox(
+                label="Model Name",
+                placeholder="meta-llama/Llama-3.1-8B-Instruct",
+                value="meta-llama/Llama-3.1-8B-Instruct",
+            )
 
+    # Toggle LLM config visibility
+    def toggle_llm_config(agent_name):
+        return gr.Accordion(visible=(agent_name == "LLM Agent (bring your own key)"))
+
+    agent_dd.change(fn=toggle_llm_config, inputs=[agent_dd], outputs=[llm_config])
+
+    # Outputs
+    summary_out = gr.Markdown()
+    plot_out = gr.Plot(label="Dashboard")
+
+    with gr.Accordion("Agent Reasoning Log (step-by-step)", open=True):
+        log_out = gr.Markdown(elem_classes=["reasoning-log"])
+
+    # Wire up the run button
     run_btn.click(
-        fn=build_dashboard,
-        inputs=[task_dd, agent_dd],
-        outputs=[plot_out, summary_out],
+        fn=run_simulation_streaming,
+        inputs=[task_dd, agent_dd, api_base_input, api_key_input, model_name_input],
+        outputs=[plot_out, log_out, summary_out],
     )
 
-    # Run on load so the page isn't empty
+    # Run on page load
     demo.load(
-        fn=build_dashboard,
-        inputs=[task_dd, agent_dd],
-        outputs=[plot_out, summary_out],
+        fn=run_simulation_streaming,
+        inputs=[task_dd, agent_dd, api_base_input, api_key_input, model_name_input],
+        outputs=[plot_out, log_out, summary_out],
     )
 
 if __name__ == "__main__":
