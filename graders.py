@@ -8,6 +8,15 @@ from __future__ import annotations
 
 from models import EpisodeStep
 
+# Scores must lie strictly inside (0, 1) per the submission validator,
+# so we clamp every grader's output to this open interval.
+SCORE_MIN = 0.01
+SCORE_MAX = 0.99
+
+
+def _clamp(score: float) -> float:
+    return round(max(SCORE_MIN, min(SCORE_MAX, score)), 4)
+
 
 # ---------------------------------------------------------------------------
 # Task Easy — Single Spike
@@ -15,22 +24,22 @@ from models import EpisodeStep
 
 def grade_task_easy(history: list[EpisodeStep]) -> float:
     """
-    Score:
-      1.0  → no crash AND avg latency across all steps < 300 ms
-      0.5  → no crash but avg latency >= 300 ms
-      0.0  → any crash occurred
+    Score (clamped to (0, 1)):
+      ~0.99 → no crash AND avg latency across all steps < 300 ms
+      ~0.50 → no crash but avg latency >= 300 ms
+      ~0.01 → any crash occurred
     """
     if not history:
-        return 0.0
+        return SCORE_MIN
 
     crashed = any(s.crashed for s in history)
     if crashed:
-        return 0.0
+        return SCORE_MIN
 
     avg_latency = sum(s.state.avg_latency for s in history) / len(history)
     if avg_latency < 300.0:
-        return 1.0
-    return 0.5
+        return _clamp(1.0)
+    return _clamp(0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +56,7 @@ def grade_task_medium(history: list[EpisodeStep]) -> float:
         linear interpolation in between
     """
     if not history:
-        return 0.0
+        return SCORE_MIN
 
     total = len(history)
     crash_steps = sum(1 for s in history if s.crashed)
@@ -63,7 +72,7 @@ def grade_task_medium(history: list[EpisodeStep]) -> float:
     else:
         latency_factor = 1.0 - 0.5 * (avg_latency - low) / (high - low)
 
-    return round(base * latency_factor, 4)
+    return _clamp(base * latency_factor)
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +88,7 @@ def grade_task_hard(history: list[EpisodeStep]) -> float:
     queue_factor     = fraction of steps where queue_length < 100
     """
     if not history:
-        return 0.0
+        return SCORE_MIN
 
     total_incoming = sum(s.incoming_requests for s in history)
     total_allowed = sum(s.allowed_requests for s in history)
@@ -104,7 +113,7 @@ def grade_task_hard(history: list[EpisodeStep]) -> float:
     else:
         score = throughput_ratio * 0.7 + queue_factor * 0.3
 
-    return round(min(1.0, max(0.0, score)), 4)
+    return _clamp(score)
 
 
 # ---------------------------------------------------------------------------
